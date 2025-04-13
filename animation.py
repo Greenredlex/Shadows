@@ -31,15 +31,15 @@ start_hour = 5
 end_hour = 21 
 
 # Percentage van data te gebruiken
-subset_width_percentage = 15
-subset_height_percentage = 15 
+subset_width_percentage = 5
+subset_height_percentage = 5 
 
 # Visualisatie instellingen (zoals de laatste werkende versie)
 dsm_colormap = 'terrain' 
-dsm_alpha = 1.0          
+dsm_alpha = 0 # 1.0          
 shadow_colormap = 'Greys_r' # Schaduw(0)=Licht, Zon(1)=Donker
 shadow_alpha = 0.6       
-basemap_provider = ctx.providers.CartoDB.Positron 
+basemap_provider = ctx.providers.OpenStreetMap.Mapnik #ctx.providers.CartoDB.Positron
 
 # Animatie snelheid (milliseconden tussen frames)
 animation_interval = 500 # ms (0.5 seconde per frame)
@@ -95,19 +95,30 @@ try:
         dsm_subset = src.read(1, window=window)
         subset_transform = src.window_transform(window)
         subset_bounds = rasterio.windows.bounds(window, src.transform)
-        subset_extent = [subset_bounds[0], subset_bounds[2], subset_bounds[1], subset_bounds[3]] 
+        subset_extent = [subset_bounds[0], subset_bounds[2], subset_bounds[1], subset_bounds[3]]
         print(f"Subset gelezen: Shape={dsm_subset.shape}, Bounds=({subset_bounds[0]:.1f}, {subset_bounds[1]:.1f}, {subset_bounds[2]:.1f}, {subset_bounds[3]:.1f})")
 
-        nodata_value = src.nodata if src.nodata is not None else -9999.0 
-        dsm_subset = dsm_subset.astype(np.float32) 
-        dsm_subset_nan = dsm_subset.copy() 
-        nodata_mask = (dsm_subset == nodata_value)
-        dsm_subset_nan[nodata_mask] = np.nan 
+        nodata_value = src.nodata if src.nodata is not None else -9999.0
+        dsm_subset_float = dsm_subset.astype(np.float32) # Use float for calculations
 
-    # Normaliseer hoogtes voor schaduwberekening (één keer)
-    min_valid_height = np.nanmin(dsm_subset_nan)
-    dsm_normalized_for_shadow = dsm_subset_nan - min_valid_height
-    print(f"DSM genormaliseerd voor schaduw (min={min_valid_height:.2f} NAP)")
+        # Create mask for NoData areas (water)
+        nodata_mask = (dsm_subset == nodata_value)
+
+        # Create DSM for visualization (with NaNs for NoData)
+        dsm_subset_nan = dsm_subset_float.copy()
+        dsm_subset_nan[nodata_mask] = np.nan
+
+        # Create DSM for shadow calculation (replace NoData with flat water level)
+        dsm_for_shadow_calc = dsm_subset_float.copy()
+        min_valid_height = np.nanmin(dsm_subset_nan) # Min height of actual land/buildings
+        water_height = min_valid_height - 1.0 # Set water level 1m below lowest land
+        dsm_for_shadow_calc[nodata_mask] = water_height
+        print(f"Min valid land height: {min_valid_height:.2f} m. Assigned water height: {water_height:.2f} m")
+
+    # Normalize heights for shadow calculation (based on the modified DSM)
+    # Water will have a negative normalized height (e.g., -1.0)
+    dsm_normalized_for_shadow = dsm_for_shadow_calc - min_valid_height
+    print(f"DSM genormaliseerd voor schaduw (min land = 0.0, water = {water_height - min_valid_height:.2f})")
 
     # --- 2. Tijdreeks Genereren ---
     local_tz = pytz.timezone(timezone)
@@ -148,7 +159,7 @@ try:
     first_sun_el_rad = radians(first_solar_pos['apparent_elevation'].iloc[0])
     
     initial_shadow = calculate_shadows(dsm_normalized_for_shadow, np.nan, subset_transform, first_sun_az_rad, first_sun_el_rad)
-    initial_shadow[np.isnan(dsm_subset_nan)] = np.nan 
+    # initial_shadow[np.isnan(dsm_subset_nan)] = np.nan # Don't mask shadows based on original NaNs
 
     img_shadow = ax.imshow(initial_shadow, # Start met eerste frame
                            cmap=shadow_colormap, 
@@ -175,7 +186,7 @@ try:
 
         # Bereken schaduw
         shadow_result = calculate_shadows(dsm_normalized_for_shadow, np.nan, subset_transform, sun_azimuth_rad, sun_elevation_rad)
-        shadow_result[np.isnan(dsm_subset_nan)] = np.nan # Maskeer NoData
+        # shadow_result[np.isnan(dsm_subset_nan)] = np.nan # Don't mask shadows based on original NaNs
 
         # Update schaduw laag data
         img_shadow.set_data(shadow_result)
