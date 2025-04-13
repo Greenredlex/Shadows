@@ -23,7 +23,7 @@ timezone = 'Europe/Amsterdam'
 animation_date = date(2025, 7, 21) # Kies de dag
 
 # Tijdstap voor animatie
-time_step_minutes = 30
+time_step_minutes = 10
 
 # Start en eindtijd (optioneel, anders hele dag)
 # Als None, pakt van zonsopgang tot zonsondergang (ongeveer)
@@ -31,12 +31,12 @@ start_hour = 5
 end_hour = 21 
 
 # Percentage van data te gebruiken
-subset_width_percentage = 5
-subset_height_percentage = 5 
+subset_width_percentage = 10
+subset_height_percentage = 10 
 
 # Visualisatie instellingen (zoals de laatste werkende versie)
 dsm_colormap = 'terrain' 
-dsm_alpha = 0 # 1.0          
+dsm_alpha = 1 # 1.0          
 shadow_colormap = 'Greys_r' # Schaduw(0)=Licht, Zon(1)=Donker
 shadow_alpha = 0.6       
 basemap_provider = ctx.providers.OpenStreetMap.Mapnik #ctx.providers.CartoDB.Positron
