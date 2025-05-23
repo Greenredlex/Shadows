@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <title>Wegdeel GeoJSON Viewer</title>
+
+    <!-- Include Leaflet CSS -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+
+    <!-- Include Leaflet JavaScript -->
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+
+    <style>
+      /* Basic styling */
+      body {
+        padding: 0;
+        margin: 0;
+      }
+      html,
+      body,
+      #map {
+        height: 100vh; /* Full viewport height */
+        width: 100vw; /* Full viewport width */
+      }
+      /* Style for layer control */
+      .leaflet-control-layers-expanded {
+        max-height: 300px; /* Limit height */
+        overflow-y: auto; /* Add scroll if needed */
+      }
+    </style>
+  </head>
+  <body>
+    <!-- The div where the map will be rendered -->
+    <div id="map"></div>
+
+    <script>
+      // --- Configuration ---
+
+      // 1. Define Center and Zoom (Adjust to your data's approximate location)
+      const mapCenter = [52.37, 4.89]; // Approx. Amsterdam Center (Latitude, Longitude)
+      const initialZoom = 13; // Adjust as needed
+
+      // 2. !!! IMPORTANT: UPDATE THIS ARRAY !!!
+      // List the layers you want to load.
+      // Each entry needs:
+      //   - displayName: How the layer appears in the control.
+      //   - fileName: The exact filename within the 'geojson_layers' folder.
+      const layersToLoad = [
+        { displayName: "Fietspad", fileName: "layer_fietspad.geojson" },
+        {
+          displayName: "Rijbaan Lokaal",
+          fileName: "layer_rijbaan_lokale_weg.geojson",
+        },
+        { displayName: "Voetpad", fileName: "layer_voetpad.geojson" },
+        { displayName: "Parkeervlak", fileName: "layer_parkeervlak.geojson" },
+        { displayName: "Inrit", fileName: "layer_inrit.geojson" },
+        { displayName: "OV-baan", fileName: "layer_OV-baan.geojson" },
+        { displayName: "Overweg", fileName: "layer_overweg.geojson" },
+        {
+          displayName: "Rijbaan Autosnelweg",
+          fileName: "layer_rijbaan_autosnelweg.geojson",
+        },
+        {
+          displayName: "Rijbaan Autoweg",
+          fileName: "layer_rijbaan_autoweg.geojson",
+        },
+        {
+          displayName: "Rijbaan Regionaal",
+          fileName: "layer_rijbaan_regionale_weg.geojson",
+        },
+        { displayName: "Ruiterpad", fileName: "layer_ruiterpad.geojson" },
+        { displayName: "Spoorbaan", fileName: "layer_spoorbaan.geojson" },
+        { displayName: "Transitie", fileName: "layer_transitie.geojson" },
+        {
+          displayName: "Voetgangersgebied",
+          fileName: "layer_voetgangersgebied.geojson",
+        },
+        {
+          displayName: "Voetpad op trap",
+          fileName: "layer_voetpad_op_trap.geojson",
+        },
+        // Add entries for ALL your other GeoJSON files here following the same format
+        // { displayName: "Another Layer", fileName: "layer_another_layer.geojson" },
+      ];
+
+      // 3. Base directory for GeoJSON files (relative to this HTML file)
+      const geojsonBaseDir = "geojson_layers";
+
+      // --- Map Initialization ---
+
+      // Create the Leaflet map instance
+      const map = L.map("map").setView(mapCenter, initialZoom);
+
+      // Add the OpenStreetMap base tile layer
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19, // Allow deep zooming
+        attribution:
+          '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      }).addTo(map);
+
+      // --- Load GeoJSON Layers ---
+
+      const overlayMaps = {}; // Object to hold layers for the control
+      const featureGroups = {}; // Object to hold the actual layer groups
+
+      // Function to generate a random hex color
+      function getRandomColor() {
+        const letters = "0123456789ABCDEF";
+        let color = "#";
+        for (let i = 0; i < 6; i++) {
+          color += letters[Math.floor(Math.random() * 16)];
+        }
+        return color;
+      }
+
+      // Loop through the defined layers
+      layersToLoad.forEach((layerInfo) => {
+        const layerName = layerInfo.displayName;
+        const geojsonUrl = `${geojsonBaseDir}/${layerInfo.fileName}`;
+        const layerColor = getRandomColor(); // Assign a random color
+
+        console.log(`Preparing layer: ${layerName} from ${geojsonUrl}`);
+
+        // Define the style for this layer's features
+        const layerStyle = {
+          fillColor: layerColor,
+          color: layerColor, // Border color
+          weight: 1.5,
+          fillOpacity: 0.6,
+        };
+
+        // Create a FeatureGroup to hold this layer's features
+        // Add it to the map immediately so it's available for the layer control
+        const group = L.featureGroup().addTo(map);
+        featureGroups[layerName] = group; // Store the group
+        overlayMaps[layerName] = group; // Add entry for the layer control
+
+        // Fetch the GeoJSON data
+        fetch(geojsonUrl)
+          .then((response) => {
+            if (!response.ok) {
+              throw new Error(
+                `Network response was not ok for ${geojsonUrl}: ${response.statusText}`
+              );
+            }
+            return response.json(); // Parse the response as JSON
+          })
+          .then((data) => {
+            console.log(`Successfully fetched and parsed ${layerInfo.fileName}`);
+            // Create a Leaflet GeoJSON layer from the data
+            L.geoJson(data, {
+              style: layerStyle, // Apply the defined style
+              onEachFeature: function (feature, layer) {
+                // Optional: Add a tooltip showing a property
+                // Assumes your GeoJSON has a 'function' property like the GML
+                if (feature.properties && feature.properties.function) {
+                  layer.bindTooltip(
+                    `Type: ${feature.properties.function}`
+                  );
+                } else {
+                  // Fallback tooltip if 'function' property is missing
+                  layer.bindTooltip(`Layer: ${layerName}`);
+                }
+              },
+            }).addTo(group); // Add the GeoJSON features to this layer's group
+            console.log(`Added GeoJSON data to layer group: ${layerName}`);
+          })
+          .catch((error) => {
+            console.error(
+              `Error fetching or processing GeoJSON for ${layerName} (${geojsonUrl}):`,
+              error
+            );
+            // Optional: Add a marker or message on the map indicating failure
+            // L.marker(mapCenter).addTo(map)
+            //  .bindPopup(`Error loading layer: ${layerName}`).openPopup();
+          });
+      });
+
+      // --- Add Layer Control ---
+      if (Object.keys(overlayMaps).length > 0) {
+        L.control
+          .layers(null, overlayMaps, { collapsed: false }) // Pass null for base layers, only overlays
+          .addTo(map);
+        console.log("Layer control added to map.");
+      } else {
+        console.warn("No layers were successfully prepared to add to the layer control.");
+      }
+
+      // --- Optional: Fit map to bounds (more complex) ---
+      // To automatically zoom to the data, you'd need to:
+      // 1. Wait for ALL fetch requests to complete.
+      // 2. Collect all created L.geoJson layers.
+      // 3. Create a FeatureGroup containing ALL layers.
+      // 4. Get the bounds of that group: `map.fitBounds(allLayersGroup.getBounds());`
+      // This requires more advanced JavaScript (e.g., using Promise.all).
+      // For now, manual zooming or adjusting `mapCenter` and `initialZoom` is simpler.
+    </script>
+  </body>
+</html>

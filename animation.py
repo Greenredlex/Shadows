@@ -12,7 +12,7 @@ from math import tan, radians, cos, sin, sqrt
 from numba import jit 
 
 # --- Configuratie ---
-dsm_path = '2023_R_25GZ1.TIF' 
+dsm_path = '2023_R_25GN1.TIF' 
 
 # Locatie 
 latitude = 52.37  
@@ -23,7 +23,7 @@ timezone = 'Europe/Amsterdam'
 animation_date = date(2025, 7, 21) # Kies de dag
 
 # Tijdstap voor animatie
-time_step_minutes = 10
+time_step_minutes = 30
 
 # Start en eindtijd (optioneel, anders hele dag)
 # Als None, pakt van zonsopgang tot zonsondergang (ongeveer)
