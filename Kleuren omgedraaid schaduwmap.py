@@ -1,0 +1,276 @@
+import rasterio
+import rasterio.windows
+import matplotlib.pyplot as plt
+import numpy as np
+import contextily as ctx
+import pvlib
+import pandas as pd
+from datetime import datetime, date, time, timedelta
+import pytz
+from math import tan, radians, cos, sin, sqrt
+from numba import jit
+import geopandas as gpd
+from rasterio import features
+
+# --- Configuratie ---
+dsm_path = '2023_R_25GN1.TIF'
+# Het pad naar het GML-bestand, nu specifiek 'bgt_wegdeel.gml' zoals aangegeven door de gebruiker.
+gml_path = 'bgt_wegdeel.gml' 
+
+# Locatie voor de zonnebaanberekening
+latitude = 52.37
+longitude = 4.89
+timezone = 'Europe/Amsterdam'
+
+# Datum voor de analyse (standaard de huidige datum)
+analysis_date = datetime.now() 
+
+# Tijdstap voor de analyse van de schaduw (in minuten)
+time_step_minutes = 30
+
+# Start- en einduur voor de analyse
+start_hour = 12
+end_hour = 18
+
+# Percentage van de DSM-data om te gebruiken voor de subset (voor snellere verwerking)
+subset_width_percentage = 10
+subset_height_percentage = 10
+
+# Instellingen voor visualisatie
+dsm_colormap = 'terrain' # Kleurenkaart voor de DSM-hoogtes (niet direct gebruikt in de finale plot)
+dsm_alpha = 1 # Transparantie van de DSM (niet direct gebruikt in de finale plot)
+shadow_colormap = 'Greys_r' # Kleurenkaart voor schaduwen (niet direct gebruikt in de finale plot)
+shadow_alpha = 0.6 # Transparantie van de schaduwlaag (niet direct gebruikt in de finale plot)
+basemap_provider = ctx.providers.OpenStreetMap.Mapnik # Basemap provider
+
+# --- Functie voor Schaduwberekening ---
+@jit(nopython=True)
+def calculate_shadows(dsm_data, nodata_value, transform, sun_azimuth_rad, sun_elevation_rad):
+    """
+    Berekent de schaduwen op basis van een Digital Surface Model (DSM), zonpositie en transformatiegegevens.
+
+    Parameters:
+    - dsm_data (np.array): De genormaliseerde DSM-data.
+    - nodata_value (float): De NoData-waarde in de DSM (gebruikt voor NaN-controle).
+    - transform (rasterio.transform.Affine): Affine transformatie van de DSM-subset.
+    - sun_azimuth_rad (float): Zon-azimut in radialen.
+    - sun_elevation_rad (float): Zon-elevatie in radialen.
+
+    Returns:
+    - np.array: Een schaduwmasker (0.0 voor schaduw, 1.0 voor zon, NaN voor NoData-gebieden).
+    """
+    rows, cols = dsm_data.shape
+    shadow_mask = np.full(dsm_data.shape, 1.0, dtype=np.float32)
+    pixel_res = abs(transform[0]) # Resolutie van een pixel in meters
+    dx = sin(sun_azimuth_rad)
+    dy = -cos(sun_azimuth_rad)
+    tan_elevation = tan(sun_elevation_rad)
+    # Maximale afstand in pixels om te controleren op schaduw (bijv. 200 meter)
+    # Dit voorkomt onnodige berekeningen voor zeer ver weg gelegen objecten.
+    max_shadow_dist_pixels = int(200 / pixel_res) if pixel_res > 0 else 100
+
+    for r in range(rows):
+        for c in range(cols):
+            h_pixel = dsm_data[r, c]
+            # Sla NoData-waarden over (bijv. watergebieden)
+            if np.isnan(h_pixel):
+                shadow_mask[r, c] = np.nan
+                continue
+            # Als de zon onder de horizon is, is het hele gebied in schaduw
+            if tan_elevation <= 0:
+                shadow_mask[r, c] = 0.0
+                continue
+            step = 1.0
+            # Loop langs de zonnestraal om te controleren op blokkades
+            for i in range(1, max_shadow_dist_pixels + 1):
+                check_c = c + int(round(i * step * dx))
+                check_r = r + int(round(i * step * dy))
+                # Stop als we buiten de grenzen van de DSM vallen
+                if not (0 <= check_r < rows and 0 <= check_c < cols):
+                    break
+                dist_pixels = sqrt((check_c - c)**2 + (check_r - r)**2)
+                dist_meters = dist_pixels * pixel_res
+                # Minimale hoogte die een object moet hebben om schaduw te werpen op de huidige pixel
+                min_blocker_height = h_pixel + dist_meters * tan_elevation
+                h_check = dsm_data[check_r, check_c]
+                # Sla NoData-waarden over
+                if np.isnan(h_check):
+                    continue
+                # Als een object hoger is dan de minimale blokkerende hoogte, is er schaduw
+                if h_check > min_blocker_height:
+                    shadow_mask[r, c] = 0.0
+                    break
+    return shadow_mask
+
+# --- Hoofd Script ---
+try:
+    # --- 1. Voorbereidingen (DSM-data lezen en normaliseren) ---
+    print("Voorbereiden van DSM-data...")
+    with rasterio.open(dsm_path) as src:
+        print(f"Originele DSM info: CRS={src.crs}, Shape={src.shape}")
+        # Bepaal de subset van de DSM om te lezen
+        subset_rows = int(src.height * (subset_height_percentage / 100.0))
+        subset_cols = int(src.width * (subset_width_percentage / 100.0))
+        window = rasterio.windows.Window(0, 0, subset_cols, subset_rows)
+        dsm_subset = src.read(1, window=window)
+        subset_transform = src.window_transform(window)
+        subset_bounds = rasterio.windows.bounds(window, src.transform)
+        subset_extent = [subset_bounds[0], subset_bounds[2], subset_bounds[1], subset_bounds[3]]
+        print(f"Subset gelezen: Shape={dsm_subset.shape}, Bounds=({subset_bounds[0]:.1f}, {subset_bounds[1]:.1f}, {subset_bounds[2]:.1f}, {subset_bounds[3]:.1f})")
+
+        # Bepaal de NoData-waarde en converteer naar float32
+        nodata_value = src.nodata if src.nodata is not None else -9999.0
+        dsm_subset_float = dsm_subset.astype(np.float32)
+
+        # Creëer een masker voor NoData-gebieden (bijv. water)
+        nodata_mask = (dsm_subset == nodata_value)
+
+        # Creëer een DSM-versie voor visualisatie (met NaNs voor NoData)
+        dsm_subset_nan = dsm_subset_float.copy()
+        dsm_subset_nan[nodata_mask] = np.nan
+
+        # Creëer een DSM-versie voor schaduwberekening (vervang NoData door een vlak waterniveau)
+        dsm_for_shadow_calc = dsm_subset_float.copy()
+        min_valid_height = np.nanmin(dsm_subset_nan)
+        # Stel waterniveau iets onder het laagste land in om te voorkomen dat water schaduw werpt
+        water_height = min_valid_height - 1.0 
+        dsm_for_shadow_calc[nodata_mask] = water_height
+        print(f"Minimale geldige landhoogte: {min_valid_height:.2f} m. Toegewezen waterhoogte: {water_height:.2f} m")
+
+    # Normaliseer hoogtes voor schaduwberekening (laagste land op 0)
+    dsm_normalized_for_shadow = dsm_for_shadow_calc - min_valid_height
+    print(f"DSM genormaliseerd voor schaduw (min land = 0.0, water = {water_height - min_valid_height:.2f})")
+
+    # --- 2. GML-data inlezen en voorbereiden (fietspaden en looppaden filteren) ---
+    print("\nLaden en voorbereiden van weggedeelten data...")
+    # Lees het GML-bestand in
+    road_gdf = gpd.read_file(gml_path)
+    print(f"Wegdelen gelezen: {len(road_gdf)} features, CRS={road_gdf.crs}")
+
+    # --- FILTEREN OP FIETS- EN LOOPPADEN ---
+    # De gebruiker heeft aangegeven dat de kolom 'function' de waarden 'voetpad' of 'fietspad' bevat.
+    classificatie_kolom = 'function' # De kolomnaam om op te filteren
+
+    # Definieer de waarden die fietspaden en looppaden representeren
+    fietspaden_waarden = ['fietspad'] 
+    looppaden_waarden = ['voetpad'] 
+
+    if classificatie_kolom in road_gdf.columns:
+        # Filter de GeoDataFrame om alleen fietspaden en looppaden te behouden
+        filtered_gdf = road_gdf[
+            (road_gdf[classificatie_kolom].isin(fietspaden_waarden)) |
+            (road_gdf[classificatie_kolom].isin(looppaden_waarden))
+        ]
+        print(f"Gefilterd op fietspaden en looppaden. Aantal geselecteerde features: {len(filtered_gdf)}")
+        if len(filtered_gdf) == 0:
+            print("WAARSCHUWING: Geen fietspaden/looppaden gevonden met de opgegeven filterwaarden. Controleer de 'fietspaden_waarden' en 'looppaden_waarden'.")
+    else:
+        print(f"FOUT: Kolom '{classificatie_kolom}' niet gevonden in het GML-bestand. Kan niet filteren op fietspaden/looppaden.")
+        print("Zorg ervoor dat de 'classificatie_kolom' correct is ingesteld op basis van je GML-bestand.")
+        # Als de kolom niet bestaat, stoppen we hier omdat de filtering niet kan plaatsvinden
+        raise ValueError(f"Kolom '{classificatie_kolom}' niet gevonden in GML-bestand.")
+
+    # Projecteer de gefilterde elementen naar het CRS van de DSM als dit verschilt
+    if filtered_gdf.crs != src.crs:
+        print(f"Reprojecteren van gefilterde elementen van {filtered_gdf.crs} naar {src.crs}...")
+        elements_gdf_reprojected = filtered_gdf.to_crs(src.crs)
+    else:
+        elements_gdf_reprojected = filtered_gdf
+
+    # Maak een rastermasker van de gefilterde geometrieën
+    # Dit masker heeft dezelfde vorm en transformatie als de DSM-subset
+    print("Rasteriseren van gefilterde fietspaden en looppaden...")
+    elements_mask = features.rasterize(
+        ((geom, 1) for geom in elements_gdf_reprojected.geometry if geom is not None), # Voeg check toe voor None geometrieën
+        out_shape=dsm_subset.shape,
+        transform=subset_transform,
+        fill=0, # Vul niet-geselecteerde gebieden met 0
+        dtype='uint8'
+    )
+    print(f"Fietspaden/looppaden rastermasker gemaakt met vorm: {elements_mask.shape}")
+
+    # --- 3. Tijdreeks Genereren ---
+    local_tz = pytz.timezone(timezone)
+    start_dt = local_tz.localize(datetime.combine(analysis_date, time(start_hour, 0)))
+    end_dt = local_tz.localize(datetime.combine(analysis_date, time(end_hour, 0)))
+
+    # Genereer tijdstippen met pandas
+    time_range = pd.date_range(start=start_dt, end=end_dt, freq=f'{time_step_minutes}min', tz=timezone)
+    print(f"\nAnalyseren van schaduw voor {len(time_range)} tijdstippen ({start_dt.strftime('%H:%M')} tot {end_dt.strftime('%H:%M')})")
+
+    # --- 4. Schaduw Accumulatie ---
+    print("\nBerekenen van schaduw accumulatie...")
+
+    # Initialiseer schaduwaccumulatie array
+    shadow_accumulation = np.zeros_like(dsm_subset_nan, dtype=np.float32)
+
+    # Verwerk elk tijdstip
+    for i, current_dt_local in enumerate(time_range):
+        print(f"Verwerken tijdstip {i+1}/{len(time_range)}: {current_dt_local.strftime('%H:%M')}")
+
+        current_dt_utc = current_dt_local.astimezone(pytz.utc)
+        loc = pvlib.location.Location(latitude, longitude, tz='UTC')
+        solar_pos = loc.get_solarposition(pd.to_datetime([current_dt_utc]))
+        sun_azimuth_rad = radians(solar_pos['azimuth'].iloc[0])
+        sun_elevation_rad = radians(solar_pos['apparent_elevation'].iloc[0])
+
+        # Bereken schaduw voor dit tijdstip
+        shadow_result = calculate_shadows(dsm_normalized_for_shadow, np.nan, subset_transform, sun_azimuth_rad, sun_elevation_rad)
+
+        # Accumuleer schaduwen (0 voor schaduw, 1 voor zon)
+        shadow_accumulation += shadow_result
+
+    # Normaliseer om percentage tijd in schaduw te krijgen
+    # 1 - (accumulatie / aantal tijdstappen) geeft het percentage tijd in schaduw
+    shadow_percentage = 1 - (shadow_accumulation / len(time_range))
+
+    # --- 5. Heatmap Visualisatie (met gefilterd masker) ---
+    print("\nMaken van heatmap visualisatie met gefilterde fietspaden en looppaden...")
+
+    # Pas het masker toe op het schaduwpercentage
+    # Zet pixels die GEEN fietspad of looppad zijn op NaN, zodat ze niet worden weergegeven op de heatmap
+    shadow_percentage_on_elements = shadow_percentage.copy()
+    shadow_percentage_on_elements[elements_mask == 0] = np.nan 
+
+    plt.figure(figsize=(12, 10))
+    ax = plt.gca()
+    ax.set_xlim(subset_bounds[0], subset_bounds[2])
+    ax.set_ylim(subset_bounds[1], subset_bounds[3])
+    ax.set_axis_off()
+    ax.set_facecolor('white') # Stel de achtergrondkleur van de assen in op wit
+
+    # Voeg basemap toe
+    ctx.add_basemap(ax, crs=src.crs.to_string(), source=basemap_provider, zorder=1)
+
+    # Plot de schaduwpercentage heatmap, nu alleen op de gefilterde elementen
+    heatmap = ax.imshow(shadow_percentage_on_elements,
+                         cmap='RdYlBu', # <--- AANGEPAST: 'RdYlBu' in plaats van 'RdYlBu_r'
+                         extent=subset_extent,
+                         alpha=0.8, 
+                         vmin=0, vmax=1,
+                         zorder=5
+                         )
+
+    # Voeg kleurenbalk toe
+    cbar = plt.colorbar(heatmap, ax=ax, shrink=0.6, label='Percentage van tijd in schaduw')
+
+    # Voeg titel toe
+    plt.title(f'Schaduw Accumulatie op Fietspaden en Looppaden - {analysis_date.strftime("%Y-%m-%d")}\n'
+              f'Van {start_dt.strftime("%H:%M")} tot {end_dt.strftime("%H:%M")}')
+
+    # Sla de heatmap op
+    heatmap_filename = f'schaduw_heatmap_fietspaden_looppaden_{analysis_date.strftime("%Y%m%d")}.png'
+    plt.savefig(heatmap_filename, dpi=300, bbox_inches='tight')
+    print(f"Heatmap opgeslagen als: {heatmap_filename}")
+
+    # Toon de heatmap
+    plt.show()
+
+except ImportError as e:
+    print(f"Fout: Benodigde bibliotheek niet gevonden. Zorg ervoor dat 'geopandas' en 'fiona' (een afhankelijkheid van geopandas) zijn geïnstalleerd. {e}")
+except FileNotFoundError as e:
+    print(f"Fout: Bestand niet gevonden op locatie: {e}. Controleer of '2023_R_25GN1.TIF' en 'bgt_wegdeel.gml' in dezelfde map staan als het script, of geef het volledige pad op.")
+except Exception as e:
+    print(f"Een onverwachte fout is opgetreden: {e}")
+    import traceback
+    traceback.print_exc()
