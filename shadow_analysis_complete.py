@@ -62,8 +62,6 @@ def get_default_bbox():
         pass
     return "4.885,52.365,4.890,52.370"
 
-# Removed simple_preview_analysis - not needed anymore
-
 def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_height_threshold, 
                             analysis_date, bbox_coords, progress=gr.Progress()):
     """Complete shadow analysis with all visualizations. Yields updates for real-time logging."""
@@ -553,14 +551,14 @@ def create_complete_app():
         with gr.Row():
             with gr.Column():
                 gr.Markdown("### 📊 Digital Surface Model (DSM)")
-                dsm_img = gr.Image(type="pil", height=400)
+                dsm_img = gr.Image(type="pil", height=400, show_label=False)
                 gr.Markdown("### 🌡️ Pixel-level Schaduw Heatmap") 
-                pixel_heatmap_img = gr.Image(type="pil", height=400)
+                pixel_heatmap_img = gr.Image(type="pil", height=400, show_label=False)
             with gr.Column():
                 gr.Markdown("### ☀️ Zonnepad")
-                sunpath_img = gr.Image(type="pil", height=400)
+                sunpath_img = gr.Image(type="pil", height=400, show_label=False)
                 gr.Markdown("### 🚴 Gemiddelde Schaduw per Fietspad/Voetpad")
-                road_heatmap_img = gr.Image(type="pil", height=400)
+                road_heatmap_img = gr.Image(type="pil", height=400, show_label=False)
         
         # Logs
         logs_output = gr.Textbox(
