@@ -68,14 +68,12 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
                             analysis_date, bbox_coords, progress=gr.Progress()):
     """Complete shadow analysis with all visualizations. Yields updates for real-time logging."""
     log_accumulator = []
-    # Placeholders for the image outputs
-    dsm_img_out, sunpath_img_out, pixel_heatmap_img_out, road_heatmap_img_out = None, None, None, None
-
-    def get_current_outputs(new_log_message=None):
-        """Helper to format the output tuple for yielding."""
-        if new_log_message:
-            log_accumulator.append(new_log_message)
-        return (dsm_img_out, sunpath_img_out, pixel_heatmap_img_out, road_heatmap_img_out, "\n".join(log_accumulator))
+    
+    def yield_log(message):
+        """Helper to yield only a log update, skipping all image updates."""
+        if message:
+            log_accumulator.append(message)
+        return (gr.skip(), gr.skip(), gr.skip(), gr.skip(), "\n".join(log_accumulator))
 
     try:
         from numba import jit
@@ -121,7 +119,7 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
             return shadow_mask
         
         progress(0.05, "🚀 Start complete analyse...")
-        yield get_current_outputs("🚀 Start complete analyse...")
+        yield yield_log("🚀 Start complete analyse...")
         
         if isinstance(analysis_date, str):
             analysis_date = datetime.strptime(analysis_date, '%Y-%m-%d').date()
@@ -132,9 +130,9 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
                 coords = [float(x.strip()) for x in bbox_coords.split(',')]
                 if len(coords) == 4:
                     bbox_parsed = coords
-                    yield get_current_outputs(f"📍 Bounding box: {bbox_parsed}")
+                    yield yield_log(f"📍 Bounding box: {bbox_parsed}")
             except:
-                yield get_current_outputs("⚠️ Bbox parse fout, gebruik default")
+                yield yield_log("⚠️ Bbox parse fout, gebruik default")
         
         progress(0.1, "📊 DSM data laden en normaliseren...")
         
@@ -172,12 +170,12 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
             dsm_for_shadow_calc[nodata_mask] = water_height
             
             dsm_data = dsm_for_shadow_calc - min_valid_height
-            yield get_current_outputs(f"📊 DSM genormaliseerd: min_hoogte={min_valid_height:.1f}m, water_hoogte={water_height:.1f}m")
+            yield yield_log(f"📊 DSM genormaliseerd: min_hoogte={min_valid_height:.1f}m, water_hoogte={water_height:.1f}m")
             
             object_mask = (dsm_data > object_height_threshold).astype(np.uint8)
-            yield get_current_outputs(f"🏗️ Object masker: {np.sum(object_mask)} pixels > {object_height_threshold}m")
+            yield yield_log(f"🏗️ Object masker: {np.sum(object_mask)} pixels > {object_height_threshold}m")
         
-        yield get_current_outputs(f"📐 DSM geladen: {dsm_data.shape}")
+        yield yield_log(f"📐 DSM geladen: {dsm_data.shape}")
         
         progress(0.15, "🛣️ Wegen data laden en filteren...")
         
@@ -197,7 +195,7 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
         clip_box = box(bounds[0], bounds[1], bounds[2], bounds[3])
         bike_foot_paths_clipped = bike_foot_paths.clip(clip_box)
         
-        yield get_current_outputs(f"🚴 Fietspaden/voetpaden: {len(bike_foot_paths_clipped)} segmenten")
+        yield yield_log(f"🚴 Fietspaden/voetpaden: {len(bike_foot_paths_clipped)} segmenten")
         
         progress(0.2, "⏰ Tijdreeks maken...")
         
@@ -206,7 +204,7 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
         end_dt = local_tz.localize(datetime.combine(analysis_date, time(end_hour, 0)))
         time_range = pd.date_range(start=start_dt, end=end_dt, freq=f'{time_step_minutes}min')
         
-        yield get_current_outputs(f"🕐 Tijdstappen: {len(time_range)}")
+        yield yield_log(f"🕐 Tijdstappen: {len(time_range)}")
         
         shadow_accumulator = np.zeros_like(dsm_data, dtype=np.float32)
         valid_times = 0
@@ -233,9 +231,9 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
                 shadow_result = calculate_shadows(dsm_data, np.nan, transform, sun_azimuth_rad, sun_elevation_rad, object_mask)
                 shadow_accumulator += shadow_result
                 valid_times += 1
-                yield get_current_outputs(f"✅ {current_dt.strftime('%H:%M')}: Az={sun_azimuth:.1f}°, El={sun_elevation:.1f}° - Schaduw berekend")
+                yield yield_log(f"✅ {current_dt.strftime('%H:%M')}: Az={sun_azimuth:.1f}°, El={sun_elevation:.1f}° - Schaduw berekend")
             else:
-                yield get_current_outputs(f"⏳ {current_dt.strftime('%H:%M')}: Az={sun_azimuth:.1f}°, El={sun_elevation:.1f}° - Zon onder horizon")
+                yield yield_log(f"⏳ {current_dt.strftime('%H:%M')}: Az={sun_azimuth:.1f}°, El={sun_elevation:.1f}° - Zon onder horizon")
         
         if valid_times > 0:
             shadow_percentage = (1 - (shadow_accumulator / valid_times)) * 100
@@ -254,9 +252,9 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
         
         try:
             ctx.add_basemap(ax1, crs=dsm_crs, source=ctx.providers.OpenStreetMap.Mapnik, alpha=0.6)
-            yield get_current_outputs("✅ Basemap toegevoegd")
+            yield yield_log("✅ Basemap toegevoegd")
         except Exception as e:
-            yield get_current_outputs(f"⚠️ Basemap kon niet worden toegevoegd: {str(e)}")
+            yield yield_log(f"⚠️ Basemap kon niet worden toegevoegd: {str(e)}")
         
         extent = [bounds[0], bounds[3], bounds[1], bounds[2]]
         im1 = ax1.imshow(dsm_display, cmap='terrain', extent=extent, alpha=0.8)
@@ -276,7 +274,8 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
         img1_buffer.seek(0)
         dsm_img_out = Image.open(img1_buffer)
         plt.close(fig1)
-        yield get_current_outputs("🖼️ DSM plot gegenereerd.")
+        log_accumulator.append("🖼️ DSM plot gegenereerd.")
+        yield (dsm_img_out, gr.skip(), gr.skip(), gr.skip(), "\n".join(log_accumulator))
 
         # === 2. Sun Path ===
         fig2, ax2 = plt.subplots(figsize=(10, 8))
@@ -302,7 +301,8 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
         img2_buffer.seek(0)
         sunpath_img_out = Image.open(img2_buffer)
         plt.close(fig2)
-        yield get_current_outputs("☀️ Zonnepad plot gegenereerd.")
+        log_accumulator.append("☀️ Zonnepad plot gegenereerd.")
+        yield (gr.skip(), sunpath_img_out, gr.skip(), gr.skip(), "\n".join(log_accumulator))
         
         progress(0.75, "📈 Pixel-level heatmap maken...")
         
@@ -317,9 +317,9 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
         
         try:
             ctx.add_basemap(ax3, crs=dsm_crs, source=ctx.providers.OpenStreetMap.Mapnik, alpha=0.5)
-            yield get_current_outputs("✅ Pixel heatmap basemap toegevoegd")
+            yield yield_log("✅ Pixel heatmap basemap toegevoegd")
         except Exception as e:
-            yield get_current_outputs(f"⚠️ Basemap pixel heatmap kon niet worden toegevoegd: {str(e)}")
+            yield yield_log(f"⚠️ Basemap pixel heatmap kon niet worden toegevoegd: {str(e)}")
         
         im3 = ax3.imshow(shadow_percentage, extent=extent, cmap=cmap, vmin=0, vmax=100, alpha=0.8)
         
@@ -340,7 +340,8 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
         img3_buffer.seek(0)
         pixel_heatmap_img_out = Image.open(img3_buffer)
         plt.close(fig3)
-        yield get_current_outputs("🌡️ Pixel heatmap gegenereerd.")
+        log_accumulator.append("🌡️ Pixel heatmap gegenereerd.")
+        yield (gr.skip(), gr.skip(), pixel_heatmap_img_out, gr.skip(), "\n".join(log_accumulator))
         
         progress(0.85, "🚴 Per-fietspad analyse maken...")
         
@@ -379,9 +380,9 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
             
             try:
                 ctx.add_basemap(ax4, crs=dsm_crs, source=ctx.providers.OpenStreetMap.Mapnik, alpha=0.7)
-                yield get_current_outputs("✅ Per-road heatmap basemap toegevoegd")
+                yield yield_log("✅ Per-road heatmap basemap toegevoegd")
             except Exception as e:
-                yield get_current_outputs(f"⚠️ Basemap per-road heatmap kon niet worden toegevoegd: {str(e)}")
+                yield yield_log(f"⚠️ Basemap per-road heatmap kon niet worden toegevoegd: {str(e)}")
             
             ax4.set_title(f'Gemiddelde Schaduw per Fietspad/Voetpad ({analysis_date})\n'
                          f'Van {start_hour:02d}:00 tot {end_hour:02d}:00', fontsize=14, fontweight='bold', y=1.03)
@@ -396,13 +397,14 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
             plt.close(fig4)
             
             avg_road_shadow = np.mean(road_shadows)
-            yield get_current_outputs("🚴 Per-fietspad plot gegenereerd.")
-            yield get_current_outputs(f"   Gemiddelde schaduw: {avg_road_shadow:.1f}%")
-            yield get_current_outputs(f"   Aantal segmenten: {len(road_shadows)}")
+            log_accumulator.append("🚴 Per-fietspad plot gegenereerd.")
+            yield (gr.skip(), gr.skip(), gr.skip(), road_heatmap_img_out, "\n".join(log_accumulator))
+            yield yield_log(f"   Gemiddelde schaduw: {avg_road_shadow:.1f}%")
+            yield yield_log(f"   Aantal segmenten: {len(road_shadows)}")
             
         else:
             road_heatmap_img_out = None
-            yield get_current_outputs("⚠️ Geen fietspaden/voetpaden gevonden voor per-segment analyse")
+            yield yield_log("⚠️ Geen fietspaden/voetpaden gevonden voor per-segment analyse")
         
         progress(1.0, "✅ Complete analyse voltooid!")
         
@@ -410,16 +412,17 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
         max_shadow = np.nanmax(shadow_percentage)
         min_shadow = np.nanmin(shadow_percentage)
         
-        yield get_current_outputs(f"📊 Totaal statistieken:")
-        yield get_current_outputs(f"   Pixel-level gemiddeld: {avg_shadow:.1f}%")
-        yield get_current_outputs(f"   Minimum: {min_shadow:.1f}%")
-        yield get_current_outputs(f"   Maximum: {max_shadow:.1f}%")
-        yield get_current_outputs(f"   Tijdstappen verwerkt: {valid_times}/{len(time_range)}")
-        yield get_current_outputs(f"🎉 Complete analyse voltooid!")
+        yield yield_log(f"📊 Totaal statistieken:")
+        yield yield_log(f"   Pixel-level gemiddeld: {avg_shadow:.1f}%")
+        yield yield_log(f"   Minimum: {min_shadow:.1f}%")
+        yield yield_log(f"   Maximum: {max_shadow:.1f}%")
+        yield yield_log(f"   Tijdstappen verwerkt: {valid_times}/{len(time_range)}")
+        yield yield_log(f"🎉 Complete analyse voltooid!")
         
     except Exception as e:
         error_msg = f"❌ Complete analyse fout: {str(e)}\n{traceback.format_exc()}"
-        yield get_current_outputs(error_msg)
+        log_accumulator.append(error_msg)
+        yield (gr.skip(), gr.skip(), gr.skip(), gr.skip(), "\n".join(log_accumulator))
 
 
 def create_complete_app():
@@ -480,7 +483,7 @@ def create_complete_app():
                 
                 threshold_slider = gr.Slider(
                     label="🏗️ Object drempel (meter)", 
-                    minimum=1, maximum=20, value=5,
+                    minimum=1, maximum=20, value=10,
                     info="Minimale hoogte voor schaduw objecten (gebouwen, bomen)"
                 )
                 
@@ -524,7 +527,7 @@ def create_complete_app():
                 
                 ### 1. **Parameters Instellen**
                 Configureer de datum, tijdstap, periode en de objectdrempel voor de analyse.
-                - **Object Drempel**: De minimale hoogte die een object moet hebben om een schaduw te werpen. Bijvoorbeeld 5 meter om de meeste bomen en gebouwen mee te nemen.
+                - **Object Drempel**: De minimale hoogte die een object moet hebben om een schaduw te werpen. Bijvoorbeeld 10 meter om de meeste bomen en gebouwen mee te nemen.
                 
                 ### 2. **Gebied Selecteren**
                 Gebruik de kaart om het analysegebied te bepalen.
