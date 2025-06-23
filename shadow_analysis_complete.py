@@ -84,16 +84,26 @@ def get_default_bbox():
 
 def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_height_threshold, 
                             analysis_date, bbox_coords, progress=gr.Progress()):
-    """Complete shadow analysis with all visualizations. Yields updates for real-time logging."""
-    global SPLIT_SEGMENTS_AVAILABLE  # Declare as global to avoid UnboundLocalError
+    """
+    Complete shadow analysis with all visualizations. 
+    Yields log updates in real-time and returns all plots at the very end.
+    """
+    # Variabelen om de plots op te slaan tot het einde
+    dsm_img_out = None
+    sunpath_img_out = None
+    pixel_heatmap_img_out = None
+    road_heatmap_img_out = None
+    
+    global SPLIT_SEGMENTS_AVAILABLE
     
     log_accumulator = []
     
     def yield_log(message):
-        """Helper to yield only a log update, skipping all image updates."""
+        """Helper to yield ONLY a log update, telling Gradio to not touch the image components."""
         if message:
             log_accumulator.append(message)
-        return (gr.skip(), gr.skip(), gr.skip(), gr.skip(), "\n".join(log_accumulator))
+        # gr.update() is the command to "leave this component as is"
+        return (gr.update(), gr.update(), gr.update(), gr.update(), "\n".join(log_accumulator))
 
     try:
         from numba import jit
@@ -161,17 +171,12 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
             nodata_value = src.nodata if src.nodata is not None else -9999.0
             
             if bbox_parsed:
-                if str(src.crs) != 'EPSG:4326':
-                    import pyproj
-                    transformer = pyproj.Transformer.from_crs('EPSG:4326', src.crs, always_xy=True)
-                    min_x, min_y = transformer.transform(bbox_parsed[0], bbox_parsed[1])
-                    max_x, max_y = transformer.transform(bbox_parsed[2], bbox_parsed[3])
-                    bbox_native = [min_x, min_y, max_x, max_y]
-                else:
-                    bbox_native = bbox_parsed
-                
+                import pyproj
+                transformer = pyproj.Transformer.from_crs('EPSG:4326', src.crs, always_xy=True)
+                min_x, min_y = transformer.transform(bbox_parsed[0], bbox_parsed[1])
+                max_x, max_y = transformer.transform(bbox_parsed[2], bbox_parsed[3])
+                bbox_native = [min_x, min_y, max_x, max_y]
                 window = rasterio.windows.from_bounds(*bbox_native, src.transform)
-                window = window.intersection(rasterio.windows.Window(0, 0, src.width, src.height))
             else:
                 window = rasterio.windows.Window(0, 0, min(1500, src.width), min(1500, src.height))
             
@@ -199,60 +204,40 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
         
         progress(0.15, "🛣️ Wegen data laden en filteren...")
         
-        # Use split segments if available, otherwise fall back to original method
         if SPLIT_SEGMENTS_AVAILABLE:
             try:
-                # Load pre-split segments for better resolution
                 bbox_bounds = (bounds[0], bounds[1], bounds[2], bounds[3])
-                bike_foot_paths_clipped = load_split_segments_for_shadow_analysis(
-                    'split_bike_foot_paths.gpkg', 
-                    bbox_bounds
-                )
-                
-                # Ensure correct CRS
+                bike_foot_paths_clipped = load_split_segments_for_shadow_analysis('split_bike_foot_paths.gpkg', bbox_bounds)
                 if bike_foot_paths_clipped.crs != dsm_crs:
                     bike_foot_paths_clipped = bike_foot_paths_clipped.to_crs(dsm_crs)
-                
                 yield yield_log(f"🚴 Fietspaden/voetpaden (50m segmenten): {len(bike_foot_paths_clipped)} segmenten")
                 yield yield_log(f"   ✅ Gebruikmakend van vooraf gesplitste segmenten voor betere resolutie")
-                
             except Exception as e:
                 yield yield_log(f"⚠️ Fout bij laden gesplitste segmenten: {e}")
                 yield yield_log("   Terugvallen op originele methode...")
                 SPLIT_SEGMENTS_AVAILABLE = False
         
         if not SPLIT_SEGMENTS_AVAILABLE:
-            # Original method
             roads_gdf = gpd.read_file('bgt_wegdeel.gml')
-            
             if 'function' in roads_gdf.columns:
                 bike_foot_paths = roads_gdf[roads_gdf['function'].isin(['fietspad', 'voetpad'])]
-                if len(bike_foot_paths) == 0:
-                    bike_foot_paths = roads_gdf.head(500)
-            else:
-                bike_foot_paths = roads_gdf.head(500)
-            
-            if bike_foot_paths.crs != dsm_crs:
-                bike_foot_paths = bike_foot_paths.to_crs(dsm_crs)
-            
+                if len(bike_foot_paths) == 0: bike_foot_paths = roads_gdf.head(500)
+            else: bike_foot_paths = roads_gdf.head(500)
+            if bike_foot_paths.crs != dsm_crs: bike_foot_paths = bike_foot_paths.to_crs(dsm_crs)
             from shapely.geometry import box
             clip_box = box(bounds[0], bounds[1], bounds[2], bounds[3])
             bike_foot_paths_clipped = bike_foot_paths.clip(clip_box)
-            
             yield yield_log(f"🚴 Fietspaden/voetpaden (origineel): {len(bike_foot_paths_clipped)} segmenten")
         
         progress(0.2, "⏰ Tijdreeks maken...")
-        
         local_tz = pytz.timezone('Europe/Amsterdam')
         start_dt = local_tz.localize(datetime.combine(analysis_date, time(start_hour, 0)))
         end_dt = local_tz.localize(datetime.combine(analysis_date, time(end_hour, 0)))
         time_range = pd.date_range(start=start_dt, end=end_dt, freq=f'{time_step_minutes}min')
-        
         yield yield_log(f"🕐 Tijdstappen: {len(time_range)}")
         
         shadow_accumulator = np.zeros_like(dsm_data, dtype=np.float32)
         valid_times = 0
-        
         latitude, longitude = 52.37, 4.89
         sun_positions = []
         
@@ -263,210 +248,110 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
             current_dt_utc = current_dt.astimezone(pytz.utc)
             loc = pvlib.location.Location(latitude, longitude, tz='UTC')
             solar_pos = loc.get_solarposition(pd.to_datetime([current_dt_utc]))
-            
-            sun_azimuth = solar_pos['azimuth'].iloc[0]
-            sun_elevation = solar_pos['apparent_elevation'].iloc[0]
-            
+            sun_azimuth, sun_elevation = solar_pos['azimuth'].iloc[0], solar_pos['apparent_elevation'].iloc[0]
             sun_positions.append({'time': current_dt.strftime('%H:%M'), 'azimuth': sun_azimuth, 'elevation': sun_elevation})
             
             if sun_elevation > 0:
-                sun_azimuth_rad = np.radians(sun_azimuth)
-                sun_elevation_rad = np.radians(sun_elevation)
-                shadow_result = calculate_shadows(dsm_data, np.nan, transform, sun_azimuth_rad, sun_elevation_rad, object_mask)
+                shadow_result = calculate_shadows(dsm_data, np.nan, transform, np.radians(sun_azimuth), np.radians(sun_elevation), object_mask)
                 shadow_accumulator += shadow_result
                 valid_times += 1
                 yield yield_log(f"✅ {current_dt.strftime('%H:%M')}: Az={sun_azimuth:.1f}°, El={sun_elevation:.1f}° - Schaduw berekend")
             else:
                 yield yield_log(f"⏳ {current_dt.strftime('%H:%M')}: Az={sun_azimuth:.1f}°, El={sun_elevation:.1f}° - Zon onder horizon")
         
-        if valid_times > 0:
-            shadow_percentage = (1 - (shadow_accumulator / valid_times)) * 100
-        else:
-            shadow_percentage = np.zeros_like(dsm_data)
+        shadow_percentage = (1 - (shadow_accumulator / valid_times)) * 100 if valid_times > 0 else np.zeros_like(dsm_data)
         
         progress(0.65, "🗺️ Visualisaties maken...")
         
         # === 1. DSM Preview ===
         fig1, ax1 = plt.subplots(figsize=(10, 8))
-        dsm_display = dsm_subset_nan
-        
-        ax1.set_xlim(bounds[0], bounds[2])
-        ax1.set_ylim(bounds[1], bounds[3])
-        ax1.set_aspect('equal')
-        
-        try:
-            ctx.add_basemap(ax1, crs=dsm_crs, source=ctx.providers.OpenStreetMap.Mapnik, alpha=0.6)
-            yield yield_log("✅ Basemap toegevoegd")
-        except Exception as e:
-            yield yield_log(f"⚠️ Basemap kon niet worden toegevoegd: {str(e)}")
-        
-        extent = [bounds[0], bounds[3], bounds[1], bounds[2]]
-        im1 = ax1.imshow(dsm_display, cmap='terrain', extent=extent, alpha=0.8)
-        ax1.contour(dsm_display, levels=10, extent=extent, colors='black', alpha=0.5, linewidths=0.8)
-
+        ax1.set_xlim(bounds[0], bounds[2]); ax1.set_ylim(bounds[1], bounds[3]); ax1.set_aspect('equal')
+        try: ctx.add_basemap(ax1, crs=dsm_crs, source=ctx.providers.OpenStreetMap.Mapnik, alpha=0.6)
+        except Exception as e: yield yield_log(f"⚠️ Basemap kon niet worden toegevoegd: {str(e)}")
         extent = [bounds[0], bounds[2], bounds[1], bounds[3]]
+        im1 = ax1.imshow(dsm_subset_nan, cmap='terrain', extent=extent, alpha=0.8)
         object_overlay = np.ma.masked_where(object_mask == 0, object_mask)
         ax1.imshow(object_overlay, extent=extent, cmap='Reds', alpha=0.4, vmin=0, vmax=1)
-        
         plt.colorbar(im1, ax=ax1, label='Hoogte (m NAP)')
         ax1.set_title(f'Digital Surface Model (DSM)\nObjecten > {object_height_threshold}m (rood overlay)', y=1.03)
-        ax1.set_xlabel('X (m)')
-        ax1.set_ylabel('Y (m)')
-        
-        img1_buffer = io.BytesIO()
-        plt.savefig(img1_buffer, format='png', dpi=150, bbox_inches='tight')
-        img1_buffer.seek(0)
+        img1_buffer = io.BytesIO(); plt.savefig(img1_buffer, format='png', dpi=150, bbox_inches='tight'); img1_buffer.seek(0)
         dsm_img_out = Image.open(img1_buffer)
         plt.close(fig1)
-        log_accumulator.append("🖼️ DSM plot gegenereerd.")
-        yield (dsm_img_out, gr.skip(), gr.skip(), gr.skip(), "\n".join(log_accumulator))
+        yield yield_log("🖼️ DSM plot gegenereerd.")
 
         # === 2. Sun Path ===
         fig2, ax2 = plt.subplots(figsize=(10, 8))
-        azimuths = [pos['azimuth'] for pos in sun_positions]
-        elevations = [pos['elevation'] for pos in sun_positions]
-        times = [pos['time'] for pos in sun_positions]
-        
-        ax2.plot(azimuths, elevations, 'o-', linewidth=3, markersize=8, color='orange', label='Zonnepad')
-        
-        for i, time_str in enumerate(times[::max(1, len(times)//8)]):
-            idx = i * max(1, len(times)//8)
-            if idx < len(azimuths):
-                ax2.annotate(time_str, (azimuths[idx], elevations[idx]), xytext=(8, 8), textcoords='offset points', fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
-        
-        ax2.set_xlabel('Azimut (°)', fontsize=12)
-        ax2.set_ylabel('Elevatie (°)', fontsize=12)
-        ax2.set_title(f'Zonnepad - {analysis_date}', fontsize=14, fontweight='bold', y=1.03)
-        ax2.grid(True, alpha=0.3)
-        ax2.legend()
-        
-        img2_buffer = io.BytesIO()
-        plt.savefig(img2_buffer, format='png', dpi=150, bbox_inches='tight')
-        img2_buffer.seek(0)
+        ax2.plot([p['azimuth'] for p in sun_positions], [p['elevation'] for p in sun_positions], 'o-', lw=3, ms=8, color='orange', label='Zonnepad')
+        ax2.set_xlabel('Azimut (°)', fontsize=12); ax2.set_ylabel('Elevatie (°)', fontsize=12)
+        ax2.set_title(f'Zonnepad - {analysis_date}', fontsize=14, fontweight='bold', y=1.03); ax2.grid(True, alpha=0.3); ax2.legend()
+        img2_buffer = io.BytesIO(); plt.savefig(img2_buffer, format='png', dpi=150, bbox_inches='tight'); img2_buffer.seek(0)
         sunpath_img_out = Image.open(img2_buffer)
         plt.close(fig2)
-        log_accumulator.append("☀️ Zonnepad plot gegenereerd.")
-        yield (gr.skip(), sunpath_img_out, gr.skip(), gr.skip(), "\n".join(log_accumulator))
+        yield yield_log("☀️ Zonnepad plot gegenereerd.")
         
         progress(0.75, "📈 Pixel-level heatmap maken...")
         
         # === 3. Pixel-level Shadow Heatmap ===
         fig3, ax3 = plt.subplots(figsize=(12, 10))
-        colors = ['red', 'orange', 'yellow', 'lightblue', 'blue', 'darkblue']
-        cmap = LinearSegmentedColormap.from_list('shadow_cmap', colors, N=100)
-        
-        ax3.set_xlim(bounds[0], bounds[2])
-        ax3.set_ylim(bounds[1], bounds[3])
-        ax3.set_aspect('equal')
-        
-        try:
-            ctx.add_basemap(ax3, crs=dsm_crs, source=ctx.providers.OpenStreetMap.Mapnik, alpha=0.5)
-            yield yield_log("✅ Pixel heatmap basemap toegevoegd")
-        except Exception as e:
-            yield yield_log(f"⚠️ Basemap pixel heatmap kon niet worden toegevoegd: {str(e)}")
-        
+        cmap = LinearSegmentedColormap.from_list('shadow_cmap', ['red', 'orange', 'yellow', 'lightblue', 'blue', 'darkblue'], N=100)
+        ax3.set_xlim(bounds[0], bounds[2]); ax3.set_ylim(bounds[1], bounds[3]); ax3.set_aspect('equal')
+        try: ctx.add_basemap(ax3, crs=dsm_crs, source=ctx.providers.OpenStreetMap.Mapnik, alpha=0.5)
+        except Exception as e: yield yield_log(f"⚠️ Basemap pixel heatmap kon niet worden toegevoegd: {str(e)}")
         im3 = ax3.imshow(shadow_percentage, extent=extent, cmap=cmap, vmin=0, vmax=100, alpha=0.8)
-        
-        if len(bike_foot_paths_clipped) > 0:
-            bike_foot_paths_clipped.plot(ax=ax3, color='white', linewidth=2, alpha=0.9)
-            bike_foot_paths_clipped.plot(ax=ax3, color='black', linewidth=1, alpha=0.7)
-        
-        cbar3 = plt.colorbar(im3, ax=ax3, shrink=0.8)
-        cbar3.set_label('Gemiddeld percentage tijd in schaduw (%)\n(Rood=weinig schaduw, Blauw=veel schaduw)', fontsize=12)
-        ax3.set_title(f'Pixel-level Schaduw Heatmap ({analysis_date})\n'
-                     f'Van {start_hour:02d}:00 tot {end_hour:02d}:00', fontsize=14, fontweight='bold', y=1.03)
-        ax3.set_xlabel('X (m)', fontsize=12)
-        ax3.set_ylabel('Y (m)', fontsize=12)
-        ax3.grid(True, alpha=0.3)
-        
-        img3_buffer = io.BytesIO()
-        plt.savefig(img3_buffer, format='png', dpi=180, bbox_inches='tight')
-        img3_buffer.seek(0)
+        if len(bike_foot_paths_clipped) > 0: bike_foot_paths_clipped.plot(ax=ax3, color='white', linewidth=1)
+        cbar3 = plt.colorbar(im3, ax=ax3, shrink=0.8); cbar3.set_label('Gemiddeld % tijd in schaduw', fontsize=12)
+        ax3.set_title(f'Pixel-level Schaduw Heatmap ({start_hour:02d}:00-{end_hour:02d}:00)', fontsize=14, fontweight='bold', y=1.03)
+        img3_buffer = io.BytesIO(); plt.savefig(img3_buffer, format='png', dpi=180, bbox_inches='tight'); img3_buffer.seek(0)
         pixel_heatmap_img_out = Image.open(img3_buffer)
         plt.close(fig3)
-        log_accumulator.append("🌡️ Pixel heatmap gegenereerd.")
-        yield (gr.skip(), gr.skip(), pixel_heatmap_img_out, gr.skip(), "\n".join(log_accumulator))
+        yield yield_log("🌡️ Pixel heatmap gegenereerd.")
         
         progress(0.85, "🚴 Per-fietspad analyse maken...")
         
         # === 4. Per-Road Shadow Analysis ===
         if len(bike_foot_paths_clipped) > 0:
             road_shadows = []
-            
-            for idx, road in bike_foot_paths_clipped.iterrows():
+            for _, road in bike_foot_paths_clipped.iterrows():
                 try:
-                    road_geom = [mapping(road.geometry)]
-                    road_mask = rasterio.features.rasterize(road_geom, out_shape=dsm_data.shape, transform=transform, fill=0, default_value=1, dtype=np.uint8)
+                    road_mask = rasterio.features.rasterize([mapping(road.geometry)], out_shape=dsm_data.shape, transform=transform, fill=0, default_value=1, dtype=np.uint8)
                     road_pixels = shadow_percentage[road_mask == 1]
-                    if len(road_pixels) > 0:
-                        road_shadows.append(np.nanmean(road_pixels))
-                    else:
-                        road_shadows.append(0)
-                except Exception:
-                    road_shadows.append(0)
+                    road_shadows.append(np.nanmean(road_pixels) if len(road_pixels) > 0 else 0)
+                except Exception: road_shadows.append(0)
             
-            bike_foot_paths_clipped = bike_foot_paths_clipped.copy()
             bike_foot_paths_clipped['shadow_pct'] = road_shadows
-            
             fig4, ax4 = plt.subplots(figsize=(12, 10))
             road_cmap = LinearSegmentedColormap.from_list('road_shadow_cmap', ['red', 'orange', 'yellow', 'lightblue', 'blue', 'darkblue'], N=100)
-            
-            if len(bike_foot_paths_clipped) > 0:
-                bike_foot_paths_clipped.plot(ax=ax4, column='shadow_pct', cmap=road_cmap, linewidth=3, vmin=0, vmax=100, legend=False)
-                sm = plt.cm.ScalarMappable(cmap=road_cmap, norm=plt.Normalize(vmin=0, vmax=100))
-                sm.set_array([])
-                cbar4 = plt.colorbar(sm, ax=ax4, shrink=0.8)
-                cbar4.set_label('Gemiddeld percentage tijd in schaduw per fietspad/voetpad (%)\n(Rood=weinig schaduw, Blauw=veel schaduw)', fontsize=12)
-            
-            ax4.set_xlim(bounds[0], bounds[2])
-            ax4.set_ylim(bounds[1], bounds[3])
-            ax4.set_aspect('equal')
-            
-            try:
-                ctx.add_basemap(ax4, crs=dsm_crs, source=ctx.providers.OpenStreetMap.Mapnik, alpha=0.7)
-                yield yield_log("✅ Per-road heatmap basemap toegevoegd")
-            except Exception as e:
-                yield yield_log(f"⚠️ Basemap per-road heatmap kon niet worden toegevoegd: {str(e)}")
-            
-            ax4.set_title(f'Gemiddelde Schaduw per Fietspad/Voetpad ({analysis_date})\n'
-                         f'Van {start_hour:02d}:00 tot {end_hour:02d}:00', fontsize=14, fontweight='bold', y=1.03)
-            ax4.set_xlabel('X (m)', fontsize=12)
-            ax4.set_ylabel('Y (m)', fontsize=12)
-            ax4.grid(True, alpha=0.3)
-            
-            img4_buffer = io.BytesIO()
-            plt.savefig(img4_buffer, format='png', dpi=180, bbox_inches='tight')
-            img4_buffer.seek(0)
+            bike_foot_paths_clipped.plot(ax=ax4, column='shadow_pct', cmap=road_cmap, linewidth=3, vmin=0, vmax=100, legend=False)
+            sm = plt.cm.ScalarMappable(cmap=road_cmap, norm=plt.Normalize(vmin=0, vmax=100)); sm.set_array([])
+            cbar4 = plt.colorbar(sm, ax=ax4, shrink=0.8); cbar4.set_label('Gemiddeld % tijd in schaduw', fontsize=12)
+            ax4.set_xlim(bounds[0], bounds[2]); ax4.set_ylim(bounds[1], bounds[3]); ax4.set_aspect('equal')
+            try: ctx.add_basemap(ax4, crs=dsm_crs, source=ctx.providers.OpenStreetMap.Mapnik, alpha=0.7)
+            except Exception as e: yield yield_log(f"⚠️ Basemap per-road heatmap kon niet worden toegevoegd: {str(e)}")
+            ax4.set_title(f'Gemiddelde Schaduw per Fietspad/Voetpad', fontsize=14, fontweight='bold', y=1.03)
+            img4_buffer = io.BytesIO(); plt.savefig(img4_buffer, format='png', dpi=180, bbox_inches='tight'); img4_buffer.seek(0)
             road_heatmap_img_out = Image.open(img4_buffer)
             plt.close(fig4)
-            
-            avg_road_shadow = np.mean(road_shadows)
-            log_accumulator.append("🚴 Per-fietspad plot gegenereerd.")
-            yield (gr.skip(), gr.skip(), gr.skip(), road_heatmap_img_out, "\n".join(log_accumulator))
-            yield yield_log(f"   Gemiddelde schaduw: {avg_road_shadow:.1f}%")
+            yield yield_log("🚴 Per-fietspad plot gegenereerd.")
+            yield yield_log(f"   Gemiddelde schaduw: {np.mean(road_shadows):.1f}%")
             yield yield_log(f"   Aantal segmenten: {len(road_shadows)}")
-            
         else:
-            road_heatmap_img_out = None
             yield yield_log("⚠️ Geen fietspaden/voetpaden gevonden voor per-segment analyse")
         
         progress(1.0, "✅ Complete analyse voltooid!")
-        
-        avg_shadow = np.nanmean(shadow_percentage)
-        max_shadow = np.nanmax(shadow_percentage)
-        min_shadow = np.nanmin(shadow_percentage)
-        
         yield yield_log(f"📊 Totaal statistieken:")
-        yield yield_log(f"   Pixel-level gemiddeld: {avg_shadow:.1f}%")
-        yield yield_log(f"   Minimum: {min_shadow:.1f}%")
-        yield yield_log(f"   Maximum: {max_shadow:.1f}%")
+        yield yield_log(f"   Pixel-level gemiddeld: {np.nanmean(shadow_percentage):.1f}%")
         yield yield_log(f"   Tijdstappen verwerkt: {valid_times}/{len(time_range)}")
-        yield yield_log(f"🎉 Complete analyse voltooid!")
+        yield yield_log(f"🎉 Complete analyse voltooid! Alle resultaten worden nu getoond.")
+        
+        # --- DE FINALE YIELD ---
+        # Geeft alle resultaten in één keer terug aan de UI.
+        yield (dsm_img_out, sunpath_img_out, pixel_heatmap_img_out, road_heatmap_img_out, "\n".join(log_accumulator))
         
     except Exception as e:
         error_msg = f"❌ Complete analyse fout: {str(e)}\n{traceback.format_exc()}"
         log_accumulator.append(error_msg)
-        yield (gr.skip(), gr.skip(), gr.skip(), gr.skip(), "\n".join(log_accumulator))
+        # Stuur lege plots en de foutmelding in de logs
+        yield (None, None, None, None, "\n".join(log_accumulator))
 
 
 def create_complete_app():
@@ -676,8 +561,21 @@ def create_complete_app():
 
         # Event handlers
         def run_complete_analysis_wrapper(date_str, timestep, start_h, end_h, threshold, bbox_str):
-            # This wrapper handles the generator from the main analysis function
-            yield from complete_shadow_analysis(timestep, start_h, end_h, threshold, date_str, bbox_str)
+            """
+            This wrapper consumes the generator from the main analysis function
+            and returns only the final set of results.
+            """
+            # Start met lege outputs, vooral voor de logs
+            outputs = gr.update(), gr.update(), gr.update(), gr.update(), ""
+            
+            # Loop door de generator heen. Elke 'yield' is een update.
+            for outputs in complete_shadow_analysis(timestep, start_h, end_h, threshold, date_str, bbox_str):
+                # We hoeven hier niets te doen, de loop consumeert de generator.
+                # De 'outputs' variabele bevat na elke stap de laatste set resultaten.
+                pass
+                
+            # Geef alleen de allerlaatste set resultaten terug die de generator heeft geproduceerd.
+            return outputs
         
         run_analysis_btn.click(
             run_complete_analysis_wrapper,
