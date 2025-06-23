@@ -4,3 +4,5 @@ geojson_layers
 *.gfs
 *.gml
 venv
+__pycache__
+*.gpkg

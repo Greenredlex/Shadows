@@ -18,6 +18,14 @@ import contextily as ctx
 from matplotlib.colors import LinearSegmentedColormap
 import traceback
 
+# Import the road segment splitter
+try:
+    from road_segment_splitter import load_split_segments_for_shadow_analysis
+    SPLIT_SEGMENTS_AVAILABLE = True
+except ImportError:
+    print("⚠️ Road segment splitter not available - using original road loading method")
+    SPLIT_SEGMENTS_AVAILABLE = False
+
 # Import original calculation functions
 def check_files_and_modules():
     """Check if all required files and modules are available"""
@@ -31,6 +39,18 @@ def check_files_and_modules():
         else:
             status["files"].append(f"❌ {file} NIET GEVONDEN")
             status["ready"] = False
+    
+    # Check optional split segments file
+    if os.path.exists('split_bike_foot_paths.gpkg'):
+        status["files"].append(f"✅ split_bike_foot_paths.gpkg (50m segmenten)")
+    else:
+        status["files"].append(f"ℹ️ split_bike_foot_paths.gpkg (wordt automatisch aangemaakt)")
+    
+    # Check road segment splitter
+    if SPLIT_SEGMENTS_AVAILABLE:
+        status["files"].append(f"✅ road_segment_splitter.py (betere resolutie)")
+    else:
+        status["files"].append(f"ℹ️ road_segment_splitter.py (optioneel)")
     
     # Check modules
     required_modules = ['rasterio', 'geopandas', 'pvlib', 'folium', 'contextily', 'numba']
@@ -65,6 +85,8 @@ def get_default_bbox():
 def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_height_threshold, 
                             analysis_date, bbox_coords, progress=gr.Progress()):
     """Complete shadow analysis with all visualizations. Yields updates for real-time logging."""
+    global SPLIT_SEGMENTS_AVAILABLE  # Declare as global to avoid UnboundLocalError
+    
     log_accumulator = []
     
     def yield_log(message):
@@ -177,23 +199,47 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
         
         progress(0.15, "🛣️ Wegen data laden en filteren...")
         
-        roads_gdf = gpd.read_file('bgt_wegdeel.gml')
+        # Use split segments if available, otherwise fall back to original method
+        if SPLIT_SEGMENTS_AVAILABLE:
+            try:
+                # Load pre-split segments for better resolution
+                bbox_bounds = (bounds[0], bounds[1], bounds[2], bounds[3])
+                bike_foot_paths_clipped = load_split_segments_for_shadow_analysis(
+                    'split_bike_foot_paths.gpkg', 
+                    bbox_bounds
+                )
+                
+                # Ensure correct CRS
+                if bike_foot_paths_clipped.crs != dsm_crs:
+                    bike_foot_paths_clipped = bike_foot_paths_clipped.to_crs(dsm_crs)
+                
+                yield yield_log(f"🚴 Fietspaden/voetpaden (50m segmenten): {len(bike_foot_paths_clipped)} segmenten")
+                yield yield_log(f"   ✅ Gebruikmakend van vooraf gesplitste segmenten voor betere resolutie")
+                
+            except Exception as e:
+                yield yield_log(f"⚠️ Fout bij laden gesplitste segmenten: {e}")
+                yield yield_log("   Terugvallen op originele methode...")
+                SPLIT_SEGMENTS_AVAILABLE = False
         
-        if 'function' in roads_gdf.columns:
-            bike_foot_paths = roads_gdf[roads_gdf['function'].isin(['fietspad', 'voetpad'])]
-            if len(bike_foot_paths) == 0:
+        if not SPLIT_SEGMENTS_AVAILABLE:
+            # Original method
+            roads_gdf = gpd.read_file('bgt_wegdeel.gml')
+            
+            if 'function' in roads_gdf.columns:
+                bike_foot_paths = roads_gdf[roads_gdf['function'].isin(['fietspad', 'voetpad'])]
+                if len(bike_foot_paths) == 0:
+                    bike_foot_paths = roads_gdf.head(500)
+            else:
                 bike_foot_paths = roads_gdf.head(500)
-        else:
-            bike_foot_paths = roads_gdf.head(500)
-        
-        if bike_foot_paths.crs != dsm_crs:
-            bike_foot_paths = bike_foot_paths.to_crs(dsm_crs)
-        
-        from shapely.geometry import box
-        clip_box = box(bounds[0], bounds[1], bounds[2], bounds[3])
-        bike_foot_paths_clipped = bike_foot_paths.clip(clip_box)
-        
-        yield yield_log(f"🚴 Fietspaden/voetpaden: {len(bike_foot_paths_clipped)} segmenten")
+            
+            if bike_foot_paths.crs != dsm_crs:
+                bike_foot_paths = bike_foot_paths.to_crs(dsm_crs)
+            
+            from shapely.geometry import box
+            clip_box = box(bounds[0], bounds[1], bounds[2], bounds[3])
+            bike_foot_paths_clipped = bike_foot_paths.clip(clip_box)
+            
+            yield yield_log(f"🚴 Fietspaden/voetpaden (origineel): {len(bike_foot_paths_clipped)} segmenten")
         
         progress(0.2, "⏰ Tijdreeks maken...")
         
