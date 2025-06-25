@@ -337,6 +337,23 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
         else:
             yield yield_log("⚠️ Geen fietspaden/voetpaden gevonden voor per-segment analyse")
         
+        progress(0.95, "💾 GeoTIFF bestanden opslaan...")
+        
+        # Save results as GeoTIFFs
+        try:
+            saved_files = save_results_as_geotiffs(
+                dsm_data, shadow_percentage, object_mask, bike_foot_paths_clipped,
+                transform, dsm_crs, analysis_date, start_hour, end_hour
+            )
+            if saved_files:
+                yield yield_log("💾 GeoTIFF bestanden opgeslagen:")
+                for filename in saved_files:
+                    yield yield_log(f"   ✅ {filename}")
+            else:
+                yield yield_log("⚠️ Geen GeoTIFF bestanden konden worden opgeslagen")
+        except Exception as e:
+            yield yield_log(f"❌ Fout bij opslaan GeoTIFF bestanden: {e}")
+        
         progress(1.0, "✅ Complete analyse voltooid!")
         yield yield_log(f"📊 Totaal statistieken:")
         yield yield_log(f"   Pixel-level gemiddeld: {np.nanmean(shadow_percentage):.1f}%")
@@ -353,6 +370,111 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
         # Stuur lege plots en de foutmelding in de logs
         yield (None, None, None, None, "\n".join(log_accumulator))
 
+def save_results_as_geotiffs(dsm_data, shadow_percentage, object_mask, bike_foot_paths_clipped, 
+                            transform, dsm_crs, analysis_date, start_hour, end_hour):
+    """
+    Save the analysis results as GeoTIFF files
+    
+    Parameters:
+    - dsm_data: normalized DSM array
+    - shadow_percentage: pixel-level shadow percentage array
+    - object_mask: binary mask of detected objects
+    - bike_foot_paths_clipped: GeoDataFrame of road segments with shadow data
+    - transform: rasterio transform for georeferencing
+    - dsm_crs: coordinate reference system
+    - analysis_date: date of analysis
+    - start_hour, end_hour: time range of analysis
+    
+    Returns:
+    - List of saved filenames
+    """
+    saved_files = []
+    output_dir = "data"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    date_str = analysis_date.strftime('%Y%m%d') if hasattr(analysis_date, 'strftime') else str(analysis_date).replace('-', '')
+    timestamp = f"{date_str}_{start_hour:02d}h{end_hour:02d}h"
+    
+    try:
+        # 1. Save DSM with object overlay
+        dsm_filename = os.path.join(output_dir, f"dsm_with_objects_{timestamp}.tif")
+        with rasterio.open(
+            dsm_filename, 'w',
+            driver='GTiff',
+            height=dsm_data.shape[0],
+            width=dsm_data.shape[1],
+            count=2,  # Two bands: DSM and object mask
+            dtype=dsm_data.dtype,
+            crs=dsm_crs,
+            transform=transform,
+            compress='lzw'
+        ) as dst:
+            dst.write(dsm_data, 1)
+            dst.write(object_mask.astype(dsm_data.dtype), 2)
+            dst.set_band_description(1, 'Normalized DSM (meters)')
+            dst.set_band_description(2, 'Object Mask (1=object, 0=ground)')
+        saved_files.append(dsm_filename)
+        
+        # 2. Save shadow percentage heatmap
+        shadow_filename = os.path.join(output_dir, f"shadow_percentage_{timestamp}.tif")
+        with rasterio.open(
+            shadow_filename, 'w',
+            driver='GTiff',
+            height=shadow_percentage.shape[0],
+            width=shadow_percentage.shape[1],
+            count=1,
+            dtype=shadow_percentage.dtype,
+            crs=dsm_crs,
+            transform=transform,
+            nodata=np.nan,
+            compress='lzw'
+        ) as dst:
+            dst.write(shadow_percentage, 1)
+            dst.set_band_description(1, f'Shadow Percentage ({start_hour:02d}h-{end_hour:02d}h)')
+        saved_files.append(shadow_filename)
+        
+        # 3. Save rasterized road shadow analysis (if available)
+        if len(bike_foot_paths_clipped) > 0 and 'shadow_pct' in bike_foot_paths_clipped.columns:
+            road_shadow_raster = np.full(dsm_data.shape, np.nan, dtype=np.float32)
+            
+            # Rasterize each road segment with its shadow percentage
+            for _, road in bike_foot_paths_clipped.iterrows():
+                try:
+                    from shapely.geometry import mapping
+                    road_mask = rasterio.features.rasterize(
+                        [mapping(road.geometry)], 
+                        out_shape=dsm_data.shape, 
+                        transform=transform, 
+                        fill=0, 
+                        default_value=1, 
+                        dtype=np.uint8
+                    )
+                    road_shadow_raster[road_mask == 1] = road['shadow_pct']
+                except Exception as e:
+                    continue
+            
+            road_filename = os.path.join(output_dir, f"road_shadows_{timestamp}.tif")
+            with rasterio.open(
+                road_filename, 'w',
+                driver='GTiff',
+                height=road_shadow_raster.shape[0],
+                width=road_shadow_raster.shape[1],
+                count=1,
+                dtype=road_shadow_raster.dtype,
+                crs=dsm_crs,
+                transform=transform,
+                nodata=np.nan,
+                compress='lzw'
+            ) as dst:
+                dst.write(road_shadow_raster, 1)
+                dst.set_band_description(1, f'Road Shadow Percentage ({start_hour:02d}h-{end_hour:02d}h)')
+            saved_files.append(road_filename)
+        
+        return saved_files
+        
+    except Exception as e:
+        print(f"Error saving GeoTIFFs: {e}")
+        return []
 
 def create_complete_app():
     """Create the complete shadow analysis application"""
@@ -474,6 +596,14 @@ def create_complete_app():
                 2.  **Zonnepad**: Het pad van de zon gedurende de geselecteerde periode.
                 3.  **Pixel Heatmap**: Een gedetailleerde kaart die per pixel toont hoeveel procent van de tijd deze in de schaduw ligt.
                 4.  **Fietspad Analyse**: Een kaart die de gemiddelde hoeveelheid schaduw per fietspad- of voetpadsegment toont.
+                
+                ### 💾 GeoTIFF Export
+                De analyse slaat automatisch drie GeoTIFF bestanden op in de `data` map:
+                - **data/dsm_with_objects_[datum]_[tijd].tif**: DSM data met objectmasker (2 bands)
+                - **data/shadow_percentage_[datum]_[tijd].tif**: Pixel-level schaduwpercentages
+                - **data/road_shadows_[datum]_[tijd].tif**: Gerasteriseerde fietspad schaduwdata
+                
+                Deze bestanden kunnen worden geopend in GIS software zoals QGIS of ArcGIS.
                 """)
         
         # Results section
