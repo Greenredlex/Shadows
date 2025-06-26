@@ -83,7 +83,7 @@ def get_default_bbox():
     return "4.885,52.365,4.890,52.370"
 
 def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_height_threshold, 
-                            analysis_date, bbox_coords, progress=gr.Progress()):
+                            analysis_date, bbox_coords, save_data, progress=gr.Progress()):
     """
     Complete shadow analysis with all visualizations. 
     Yields log updates in real-time and returns all plots at the very end.
@@ -337,22 +337,26 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
         else:
             yield yield_log("⚠️ Geen fietspaden/voetpaden gevonden voor per-segment analyse")
         
-        progress(0.95, "💾 GeoTIFF bestanden opslaan...")
-        
-        # Save results as GeoTIFFs
-        try:
-            saved_files = save_results_as_geotiffs(
-                dsm_data, shadow_percentage, object_mask, bike_foot_paths_clipped,
-                transform, dsm_crs, analysis_date, start_hour, end_hour
-            )
-            if saved_files:
-                yield yield_log("💾 GeoTIFF bestanden opgeslagen:")
-                for filename in saved_files:
-                    yield yield_log(f"   ✅ {filename}")
-            else:
-                yield yield_log("⚠️ Geen GeoTIFF bestanden konden worden opgeslagen")
-        except Exception as e:
-            yield yield_log(f"❌ Fout bij opslaan GeoTIFF bestanden: {e}")
+        if save_data:
+            progress(0.95, "💾 GeoTIFF bestanden opslaan...")
+            
+            # Save results as GeoTIFFs
+            try:
+                saved_files = save_results_as_geotiffs(
+                    dsm_data, shadow_percentage, object_mask, bike_foot_paths_clipped,
+                    transform, dsm_crs, analysis_date, start_hour, end_hour
+                )
+                if saved_files:
+                    yield yield_log("💾 GeoTIFF bestanden opgeslagen:")
+                    for filename in saved_files:
+                        yield yield_log(f"   ✅ {filename}")
+                else:
+                    yield yield_log("⚠️ Geen GeoTIFF bestanden konden worden opgeslagen")
+            except Exception as e:
+                yield yield_log(f"❌ Fout bij opslaan GeoTIFF bestanden: {e}")
+        else:
+            progress(0.95, "⏩ Opslaan van bestanden overgeslagen.")
+            yield yield_log("⏩ Opslaan van GeoTIFF bestanden overgeslagen (optie uitgevinkt).")
         
         progress(1.0, "✅ Complete analyse voltooid!")
         yield yield_log(f"📊 Totaal statistieken:")
@@ -569,6 +573,13 @@ def create_complete_app():
                 )
                 
                 gr.Markdown("## 🚀 Stap 3: Analyse Uitvoeren")
+                
+                save_data_checkbox = gr.Checkbox(
+                    label="💾 Analysegegevens opslaan (GeoTIFF)",
+                    value=True,
+                    info="Sla de resultaten (DSM, schaduw heatmap, etc.) op in de 'data' map."
+                )
+                
                 run_analysis_btn = gr.Button("🚀 Start Complete Analyse", variant="primary", size="lg")
             
             # Right column: Instructions
@@ -690,7 +701,7 @@ def create_complete_app():
         """)
 
         # Event handlers
-        def run_complete_analysis_wrapper(date_str, timestep, start_h, end_h, threshold, bbox_str):
+        def run_complete_analysis_wrapper(date_str, timestep, start_h, end_h, threshold, bbox_str, save_data):
             """
             This wrapper consumes the generator from the main analysis function
             and returns only the final set of results.
@@ -699,7 +710,7 @@ def create_complete_app():
             outputs = gr.update(), gr.update(), gr.update(), gr.update(), ""
             
             # Loop door de generator heen. Elke 'yield' is een update.
-            for outputs in complete_shadow_analysis(timestep, start_h, end_h, threshold, date_str, bbox_str):
+            for outputs in complete_shadow_analysis(timestep, start_h, end_h, threshold, date_str, bbox_str, save_data):
                 # We hoeven hier niets te doen, de loop consumeert de generator.
                 # De 'outputs' variabele bevat na elke stap de laatste set resultaten.
                 pass
@@ -709,7 +720,7 @@ def create_complete_app():
         
         run_analysis_btn.click(
             run_complete_analysis_wrapper,
-            inputs=[date_input, timestep_slider, start_hour_slider, end_hour_slider, threshold_slider, bbox_input],
+            inputs=[date_input, timestep_slider, start_hour_slider, end_hour_slider, threshold_slider, bbox_input, save_data_checkbox],
             outputs=[dsm_img, sunpath_img, pixel_heatmap_img, road_heatmap_img, logs_output]
         )
         
