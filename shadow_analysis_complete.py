@@ -18,6 +18,9 @@ import contextily as ctx
 from matplotlib.colors import LinearSegmentedColormap
 import traceback
 
+#files:
+tif_file = "OUTPUT.TIF"
+
 # Import the road segment splitter
 try:
     from road_segment_splitter import load_split_segments_for_shadow_analysis
@@ -32,7 +35,7 @@ def check_files_and_modules():
     status = {"files": [], "modules": [], "ready": True}
     
     # Check files
-    required_files = ['2023_R_25GN1.TIF', 'bgt_wegdeel.gml']
+    required_files = [tif_file, 'bgt_wegdeel.gml']
     for file in required_files:
         if os.path.exists(file):
             status["files"].append(f"✅ {file}")
@@ -67,7 +70,7 @@ def check_files_and_modules():
 def get_default_bbox():
     """Get a reasonable default bounding box"""
     try:
-        with rasterio.open('2023_R_25GN1.TIF') as src:
+        with rasterio.open(tif_file) as src:
             bounds = src.bounds
             if str(src.crs) != 'EPSG:4326':
                 import pyproj
@@ -166,7 +169,7 @@ def complete_shadow_analysis(time_step_minutes, start_hour, end_hour, object_hei
         
         progress(0.1, "📊 DSM data laden en normaliseren...")
         
-        with rasterio.open('2023_R_25GN1.TIF') as src:
+        with rasterio.open(tif_file) as src:
             dsm_crs = src.crs
             nodata_value = src.nodata if src.nodata is not None else -9999.0
             
@@ -396,7 +399,7 @@ def save_results_as_geotiffs(dsm_data, shadow_percentage, object_mask, bike_foot
     output_dir = "data"
     os.makedirs(output_dir, exist_ok=True)
     
-    date_str = analysis_date.strftime('%Y%m%d') if hasattr(analysis_date, 'strftime') else str(analysis_date).replace('-', '')
+    date_str = datetime.now().strftime('%Y%m%d%H%M%S').replace('-', '')
     timestamp = f"{date_str}_{start_hour:02d}h{end_hour:02d}h"
     
     try:
@@ -744,7 +747,7 @@ def create_selection_map():
     """
     try:
         # Determine coverage area of height (DSM) and road files
-        with rasterio.open('2023_R_25GN1.TIF') as src:
+        with rasterio.open(tif_file) as src:
             dsm_bounds = src.bounds
             dsm_crs = src.crs
         gml_gdf = gpd.read_file('bgt_wegdeel.gml')
